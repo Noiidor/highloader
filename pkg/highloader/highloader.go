@@ -52,6 +52,10 @@ func Run(args AppArgs) error {
 		return err
 	}
 
+	for k, v := range args.Headers {
+		req.Header.Set(k, v)
+	}
+
 	client := http.Client{
 		Timeout: time.Millisecond * time.Duration(args.ReqTimeout),
 	}
