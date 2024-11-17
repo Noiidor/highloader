@@ -3,7 +3,6 @@ package highloader
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -32,7 +31,7 @@ type AppArgs struct {
 	Method      HTTPMethod
 	HTTPVersion string // TODO: change to enum
 	Headers     map[string]string
-	Payload     interface{}
+	Payload     []byte
 
 	RPS        uint32
 	ReqTotal   uint64
@@ -58,14 +57,8 @@ func Run(args AppArgs, output io.Writer) error {
 	}
 
 	bodyBuf := new(bytes.Buffer)
-	if args.Payload != nil {
-
-		jsonData, err := json.Marshal(args.Payload)
-		if err != nil {
-			return err
-		}
-
-		_, err = bodyBuf.Write(jsonData)
+	if len(args.Payload) > 0 {
+		_, err := bodyBuf.Write(args.Payload)
 		if err != nil {
 			return err
 		}
