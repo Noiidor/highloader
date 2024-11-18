@@ -89,6 +89,8 @@ func Run(args AppArgs, output io.Writer) error {
 					req.Header.Set(k, v)
 				}
 
+				// time.Sleep(time.Microsecond * 3200)
+
 				res, err := client.Do(req)
 				if err != nil {
 					ErrorRequests.Add(1)
@@ -122,7 +124,7 @@ func Run(args AppArgs, output io.Writer) error {
 
 			printStats := func() {
 				if firstClear {
-					clearLines(5)
+					// clearLines(5)
 				}
 
 				msPassed := time.Since(beforeReq).Milliseconds()
@@ -160,8 +162,13 @@ func Run(args AppArgs, output io.Writer) error {
 
 	fmt.Printf("Total time: %s\n", time.Since(beforeReq))
 
+	errorsMap := make(map[string]struct{})
 	for v := range errorsChan {
-		fmt.Printf("Err: %s\n", v)
+		_, ok := errorsMap[v.Error()]
+		if !ok {
+			errorsMap[v.Error()] = struct{}{}
+			fmt.Printf("Err: %s\n", v)
+		}
 	}
 
 	return nil
