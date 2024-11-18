@@ -14,8 +14,9 @@ func main() {
 		HTTPVersion: "1.1",
 		ReqTotal:    40000,
 		Payload:     []byte("{test: \"test\"}"),
-		ReqTimeout:  100,
+		ReqTimeout:  5,
 		Timeout:     100,
+		RPS:         1000,
 	},
 		os.Stdout,
 	)

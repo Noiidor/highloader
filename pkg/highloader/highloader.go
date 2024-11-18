@@ -10,6 +10,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"golang.org/x/time/rate"
 )
 
 type HTTPMethod uint8
@@ -72,10 +74,14 @@ func Run(args AppArgs, output io.Writer) error {
 
 	wg := sync.WaitGroup{}
 
+	limiter := rate.NewLimiter(rate.Limit(args.RPS), int(args.RPS))
+
 	for range maxRoutines {
 		wg.Add(1)
 		go func() {
 			for TotalRequests.Load() <= args.ReqTotal {
+				limiter.Wait(ctx)
+
 				TotalRequests.Add(1)
 
 				req, err := http.NewRequestWithContext(ctx, args.Method.String(), args.URL, body)
@@ -88,8 +94,6 @@ func Run(args AppArgs, output io.Writer) error {
 				for k, v := range args.Headers {
 					req.Header.Set(k, v)
 				}
-
-				// time.Sleep(time.Microsecond * 3200)
 
 				res, err := client.Do(req)
 				if err != nil {
@@ -131,7 +135,7 @@ func Run(args AppArgs, output io.Writer) error {
 
 				totalReq := TotalRequests.Load()
 
-				rps := uint32(float64(totalReq) / (float64(msPassed) / 1000))
+				rps := int(float64(totalReq) / (float64(msPassed) / 1000))
 
 				fmt.Fprintf(out, "Total Requests: %d\n", totalReq)
 				fmt.Fprintf(out, "RPS: %d\n", rps)
