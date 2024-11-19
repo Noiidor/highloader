@@ -42,9 +42,9 @@ type AppArgs struct {
 
 	RPS        uint32
 	ReqTotal   uint64
-	ReqTimeout uint64 // msec
+	ReqTimeout time.Duration
 
-	Timeout uint64 // seconds
+	Timeout time.Duration
 }
 
 // TODO: replace with not global vars
@@ -54,7 +54,7 @@ var FailedRequests atomic.Uint64
 var ErrorRequests atomic.Uint64
 
 func Run(ctx context.Context, args AppArgs, output io.Writer) error {
-	ctx, cancel := context.WithTimeout(ctx, time.Second*time.Duration(args.Timeout))
+	ctx, cancel := context.WithTimeout(ctx, args.Timeout)
 	defer cancel()
 
 	go func() {
@@ -67,7 +67,7 @@ func Run(ctx context.Context, args AppArgs, output io.Writer) error {
 	}()
 
 	client := http.Client{
-		Timeout: time.Millisecond * time.Duration(args.ReqTimeout),
+		Timeout: args.ReqTimeout,
 	}
 
 	switch args.HTTPVersion {
