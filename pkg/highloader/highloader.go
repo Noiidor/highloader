@@ -6,9 +6,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"os/signal"
 	"runtime"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"golang.org/x/time/rate"
@@ -51,6 +54,15 @@ var ErrorRequests atomic.Uint64
 func Run(args AppArgs, output io.Writer) error {
 	ctx, cancel := context.WithTimeout(context.TODO(), time.Second*time.Duration(args.Timeout))
 	defer cancel()
+
+	go func() {
+		exit := make(chan os.Signal, 1)
+		signal.Notify(exit, syscall.SIGINT, syscall.SIGTERM)
+
+		<-exit
+		fmt.Println("Gracefully shutting down...")
+		cancel()
+	}()
 
 	errorsChan := make(chan error, args.ReqTotal)
 
