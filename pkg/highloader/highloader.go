@@ -3,6 +3,7 @@ package highloader
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -14,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"golang.org/x/net/http2"
 	"golang.org/x/time/rate"
 )
 
@@ -34,7 +36,7 @@ func (m HTTPMethod) String() string {
 type AppArgs struct {
 	URL         string
 	Method      HTTPMethod
-	HTTPVersion string // TODO: change to enum
+	HTTPVersion int
 	Headers     map[string]string
 	Payload     []byte
 
@@ -51,8 +53,8 @@ var SuccessfulRequests atomic.Uint64
 var FailedRequests atomic.Uint64
 var ErrorRequests atomic.Uint64
 
-func Run(args AppArgs, output io.Writer) error {
-	ctx, cancel := context.WithTimeout(context.TODO(), time.Second*time.Duration(args.Timeout))
+func Run(ctx context.Context, args AppArgs, output io.Writer) error {
+	ctx, cancel := context.WithTimeout(ctx, time.Second*time.Duration(args.Timeout))
 	defer cancel()
 
 	go func() {
@@ -64,10 +66,17 @@ func Run(args AppArgs, output io.Writer) error {
 		cancel()
 	}()
 
-	errorsChan := make(chan error, args.ReqTotal)
-
 	client := http.Client{
 		Timeout: time.Millisecond * time.Duration(args.ReqTimeout),
+	}
+
+	switch args.HTTPVersion {
+	case 1:
+		break
+	case 2:
+		client.Transport = &http2.Transport{}
+	default:
+		return errors.New("unsupported HTTP version")
 	}
 
 	bodyBuf := new(bytes.Buffer)
@@ -83,6 +92,8 @@ func Run(args AppArgs, output io.Writer) error {
 	maxRoutines := runtime.GOMAXPROCS(0)
 
 	beforeReq := time.Now()
+
+	errorsChan := make(chan error, args.ReqTotal)
 
 	wg := sync.WaitGroup{}
 
@@ -174,7 +185,6 @@ func Run(args AppArgs, output io.Writer) error {
 
 	wg.Wait()
 	close(errorsChan)
-	cancel()
 
 	fmt.Printf("Total time: %s\n", time.Since(beforeReq))
 
