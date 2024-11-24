@@ -7,12 +7,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
-	"os/signal"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"golang.org/x/net/http2"
@@ -22,22 +20,30 @@ import (
 type HTTPMethod uint8
 
 const (
-	GET HTTPMethod = iota
-	POST
-	PUT
-	PATCH
-	DELETE
+	HTTPMethodGET HTTPMethod = iota
+	HTTPMethodPOST
+	HTTPMethodPUT
+	HTTPMethodPATCH
+	HTTPMethodDELETE
 )
 
 func (m HTTPMethod) String() string {
 	return [...]string{"GET", "POST", "PUT", "PATCH", "DELETE"}[m]
 }
 
+var HTTPMethodEnum = map[string]HTTPMethod{
+	"GET":    HTTPMethodGET,
+	"POST":   HTTPMethodPOST,
+	"PUT":    HTTPMethodPUT,
+	"PATCH":  HTTPMethodPATCH,
+	"DELETE": HTTPMethodDELETE,
+}
+
 type AppArgs struct {
 	URL         string
 	Method      HTTPMethod
 	HTTPVersion int
-	Headers     map[string]string
+	Headers     http.Header
 	Payload     []byte
 
 	RPS        uint32
@@ -47,7 +53,7 @@ type AppArgs struct {
 	Timeout time.Duration
 }
 
-// TODO: replace with not global vars
+// TODO: replace with something ither than global vars
 var TotalRequests atomic.Uint64
 var SuccessfulRequests atomic.Uint64
 var FailedRequests atomic.Uint64
@@ -56,15 +62,6 @@ var ErrorRequests atomic.Uint64
 func Run(ctx context.Context, args AppArgs, output io.Writer) error {
 	ctx, cancel := context.WithTimeout(ctx, args.Timeout)
 	defer cancel()
-
-	go func() {
-		exit := make(chan os.Signal, 1)
-		signal.Notify(exit, syscall.SIGINT, syscall.SIGTERM)
-
-		<-exit
-		fmt.Println("Gracefully shutting down...")
-		cancel()
-	}()
 
 	client := http.Client{
 		Timeout: args.ReqTimeout,
@@ -102,46 +99,58 @@ func Run(ctx context.Context, args AppArgs, output io.Writer) error {
 	for range maxRoutines {
 		wg.Add(1)
 		go func() {
-			for TotalRequests.Load() <= args.ReqTotal {
-				limiter.Wait(ctx)
+			defer wg.Done()
 
-				TotalRequests.Add(1)
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+					if TotalRequests.Load() >= args.ReqTotal {
+						return
+					}
+					TotalRequests.Add(1)
 
-				req, err := http.NewRequestWithContext(ctx, args.Method.String(), args.URL, body)
-				if err != nil {
-					ErrorRequests.Add(1)
-					errorsChan <- err
-					continue
+					if err := limiter.Wait(ctx); err != nil {
+						errorsChan <- err
+						return
+					}
+
+					req, err := http.NewRequestWithContext(ctx, args.Method.String(), args.URL, body)
+					if err != nil {
+						ErrorRequests.Add(1)
+						errorsChan <- err
+						continue
+					}
+
+					for k, v := range args.Headers {
+						req.Header.Add(k, strings.Join(v, ","))
+					}
+
+					res, err := client.Do(req)
+					if err != nil {
+						ErrorRequests.Add(1)
+						errorsChan <- err
+						continue
+					}
+					res.Body.Close()
+
+					switch res.Status[0] {
+					case '2':
+						SuccessfulRequests.Add(1)
+					case '4' | '5':
+						FailedRequests.Add(1)
+					}
+
+					// _, err = io.ReadAll(req.Body)
+					// if err != nil {
+					// 	ErrorRequests.Add(1)
+					// 	errorsChan <- err
+					// 	continue
+					// }
 				}
-
-				for k, v := range args.Headers {
-					req.Header.Set(k, v)
-				}
-
-				res, err := client.Do(req)
-				if err != nil {
-					ErrorRequests.Add(1)
-					errorsChan <- err
-					continue
-				}
-				defer res.Body.Close()
-
-				if res.Status[0] == []byte("2")[0] {
-					SuccessfulRequests.Add(1)
-				} else {
-					FailedRequests.Add(1)
-				}
-
-				_, err = io.ReadAll(req.Body)
-				if err != nil {
-
-					ErrorRequests.Add(1)
-					errorsChan <- err
-					continue
-				}
-
 			}
-			wg.Done()
+
 		}()
 	}
 
@@ -176,7 +185,7 @@ func Run(ctx context.Context, args AppArgs, output io.Writer) error {
 				case <-ctx.Done():
 					printStats()
 					break loop
-				case <-time.After(time.Millisecond * 200):
+				case <-time.After(time.Millisecond * 1000):
 					printStats()
 				}
 			}
