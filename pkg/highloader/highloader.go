@@ -64,6 +64,9 @@ func Run(ctx context.Context, args Opts) (<-chan Stats, <-chan error, error) {
 	if args.RPS == 0 {
 		return nil, nil, errors.New("0 RPS is not allowed")
 	}
+	if args.StatsPushFreq == 0 {
+		return nil, nil, errors.New("push frequency cannot be 0")
+	}
 
 	ctx, cancel := context.WithTimeout(ctx, args.TotalTimeout)
 	var err error
@@ -99,7 +102,7 @@ func Run(ctx context.Context, args Opts) (<-chan Stats, <-chan error, error) {
 
 	maxRoutines := runtime.GOMAXPROCS(0) // TODO: find more optimal number of goroutines. (maybe pool?)
 
-	statsChan := make(chan Stats, args.TotalTimeout/args.StatsPushFreq) // possible memory issues?(too much structs)
+	statsChan := make(chan Stats, args.TotalTimeout/args.StatsPushFreq) // possible memory issues?(too big buffer)
 	errorsChan := make(chan error, args.ReqTotal)
 
 	wg := sync.WaitGroup{}
@@ -135,9 +138,6 @@ func Run(ctx context.Context, args Opts) (<-chan Stats, <-chan error, error) {
 						continue
 					}
 
-					// for k, v := range args.Headers {
-					// 	req.Header.Add(k, strings.Join(v, ","))
-					// }
 					req.Header = args.Headers
 
 					res, err := client.Do(req)
