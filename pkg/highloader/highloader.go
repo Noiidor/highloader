@@ -189,13 +189,15 @@ func Run(ctx context.Context, args Opts) (<-chan Stats, <-chan error, error) {
 			}
 		}
 
+		ticker := time.NewTicker(args.StatsPushFreq)
+
 	loop:
 		for {
 			select {
 			case <-ctx.Done():
 				sendStats()
 				break loop
-			case <-time.After(args.StatsPushFreq):
+			case <-ticker.C:
 				sendStats()
 			}
 		}
