@@ -81,12 +81,9 @@ func RunApp(ctx context.Context, out io.Writer) error {
 	}
 
 	for v := range statsChan {
-		fmt.Fprintf(out, "Total Requests: %d\n", v.TotalRequests)
-		fmt.Fprintf(out, "RPS: %d\n", v.RPS)
-		fmt.Fprintf(out, "Successful Requests: %d\n", v.SuccessRequests)
-		fmt.Fprintf(out, "Failed Requests: %d\n", v.FailedRequests)
-		fmt.Fprintf(out, "Error Requests: %d\n", v.Errors)
+		fmt.Println(v)
 	}
+	// Print only unique errors
 	errorsMap := make(map[string]struct{})
 	for v := range errorsChan {
 		if _, ok := errorsMap[v.Error()]; !ok {

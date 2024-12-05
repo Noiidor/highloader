@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"runtime"
@@ -53,11 +54,26 @@ type Opts struct {
 }
 
 type Stats struct {
-	TotalRequests   uint64
-	SuccessRequests uint64
-	FailedRequests  uint64
-	Errors          uint64
-	RPS             uint32
+	TotalRequests   uint64 `json:"totalRequests"`
+	SuccessRequests uint64 `json:"successRequests"`
+	FailedRequests  uint64 `json:"failedRequests"`
+	Errors          uint64 `json:"errors"`
+	RPS             uint32 `json:"rps"`
+}
+
+func (s Stats) String() string {
+	return fmt.Sprintf( // ugly but necessary
+		`Total Requests: %d
+RPS: %d
+Successful Requests: %d
+Failed Requests: %d
+Error Requests: %d`,
+		s.TotalRequests,
+		s.RPS,
+		s.SuccessRequests,
+		s.FailedRequests,
+		s.Errors,
+	)
 }
 
 func Run(ctx context.Context, args Opts) (<-chan Stats, <-chan error, error) {
