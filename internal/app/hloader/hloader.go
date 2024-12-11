@@ -47,7 +47,7 @@ func RunApp(ctx context.Context, out io.Writer) error {
 		headers[k] = strings.Split(v, ",")
 	}
 
-	ctx, cancel := context.WithCancel(ctx)
+	ctx, cancel := context.WithTimeout(ctx, args.TotalTimeout)
 	defer cancel()
 
 	go func() {
@@ -71,7 +71,6 @@ func RunApp(ctx context.Context, out io.Writer) error {
 			Payload:       []byte(args.Payload),
 			Headers:       headers,
 			ReqTimeout:    args.ReqTimeout,
-			TotalTimeout:  args.TotalTimeout,
 			RPS:           uint32(args.RPS),
 			StatsPushFreq: args.PrintStatsFreq,
 		},

@@ -49,7 +49,6 @@ type Opts struct {
 	ReqTotal   uint64
 	ReqTimeout time.Duration
 
-	TotalTimeout  time.Duration // maximum duration of execution
 	StatsPushFreq time.Duration // frequency of sending stats struct to a channel
 }
 
@@ -76,6 +75,32 @@ Error Requests: %d`,
 	)
 }
 
+func newClient(reqTimeout time.Duration, HTTPVer int) *http.Client {
+	client := http.Client{
+		Timeout: reqTimeout,
+	}
+
+	switch HTTPVer {
+	case 1:
+		break
+	case 2:
+		client.Transport = &http2.Transport{}
+	}
+
+	return &client
+}
+
+func newRequest(ctx context.Context, method, url string, body io.Reader, headers http.Header) (*http.Request, error) {
+	req, err := http.NewRequestWithContext(ctx, method, url, body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header = headers
+
+	return req, nil
+}
+
 func Run(ctx context.Context, args Opts) (<-chan Stats, <-chan error, error) {
 	if args.RPS == 0 {
 		return nil, nil, errors.New("0 RPS is not allowed")
@@ -83,27 +108,20 @@ func Run(ctx context.Context, args Opts) (<-chan Stats, <-chan error, error) {
 	if args.StatsPushFreq == 0 {
 		return nil, nil, errors.New("push frequency cannot be 0")
 	}
+	if args.HTTPVersion != 1 && args.HTTPVersion != 2 { // meh
+		return nil, nil, errors.New("unsupported HTTP version")
+	}
 
-	ctx, cancel := context.WithTimeout(ctx, args.TotalTimeout)
 	var err error
-	defer func() { // hack?
+
+	ctx, cancel := context.WithCancel(ctx)
+	go func() {
 		if err != nil {
 			cancel()
 		}
 	}()
 
-	client := http.Client{
-		Timeout: args.ReqTimeout,
-	}
-
-	switch args.HTTPVersion {
-	case 1:
-		break
-	case 2:
-		client.Transport = &http2.Transport{}
-	default:
-		return nil, nil, errors.New("unsupported HTTP version")
-	}
+	client := newClient(args.ReqTimeout, args.HTTPVersion)
 
 	bodyBuf := new(bytes.Buffer)
 	if len(args.Payload) > 0 {
@@ -118,7 +136,7 @@ func Run(ctx context.Context, args Opts) (<-chan Stats, <-chan error, error) {
 
 	maxRoutines := runtime.GOMAXPROCS(0) // TODO: find more optimal number of goroutines. (maybe pool?)
 
-	statsChan := make(chan Stats, args.TotalTimeout/args.StatsPushFreq) // possible memory issues?(too big buffer)
+	statsChan := make(chan Stats, 1000) // bad
 	errorsChan := make(chan error, args.ReqTotal)
 
 	wg := sync.WaitGroup{}
@@ -127,6 +145,12 @@ func Run(ctx context.Context, args Opts) (<-chan Stats, <-chan error, error) {
 
 	beforeReq := time.Now()
 
+	// reqQueue := make(chan *http.Request, maxRoutines)
+	//
+	// for totalRequests.Load() < args.ReqTotal {
+	//
+	// }
+	//
 	for range maxRoutines {
 		wg.Add(1)
 		go func() {
@@ -147,14 +171,12 @@ func Run(ctx context.Context, args Opts) (<-chan Stats, <-chan error, error) {
 						return
 					}
 
-					req, err := http.NewRequestWithContext(ctx, args.Method.String(), args.URL, body)
+					req, err := newRequest(ctx, args.Method.String(), args.URL, body, args.Headers)
 					if err != nil {
 						errorRequests.Add(1)
 						errorsChan <- err
 						continue
 					}
-
-					req.Header = args.Headers
 
 					res, err := client.Do(req)
 					if err != nil {
@@ -212,6 +234,7 @@ func Run(ctx context.Context, args Opts) (<-chan Stats, <-chan error, error) {
 			select {
 			case <-ctx.Done():
 				sendStats()
+				close(statsChan)
 				break loop
 			case <-ticker.C:
 				sendStats()
@@ -222,7 +245,6 @@ func Run(ctx context.Context, args Opts) (<-chan Stats, <-chan error, error) {
 	go func() {
 		wg.Wait()
 		cancel()
-		close(statsChan)
 		close(errorsChan)
 	}()
 
