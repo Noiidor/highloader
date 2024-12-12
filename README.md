@@ -29,7 +29,7 @@ func main() {
     ctx := context.Background()
     opts := highloader.Opts{
         URL: "url",
-		Method: highloader.HTTPMethodEnum["GET"],
+	Method: highloader.HTTPMethodEnum["GET"],
         RPS: 100,
         // There are more options
     }
