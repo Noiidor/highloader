@@ -132,12 +132,10 @@ func Run(ctx context.Context, args Opts) (<-chan Stats, <-chan error, error) {
 	}
 	body := io.NopCloser(bodyBuf)
 
+	// Maybe do it somehow through channels?
 	var totalRequests, successfulRequests, failedRequests, errorRequests atomic.Uint64
 
 	maxRoutines := runtime.GOMAXPROCS(0) // TODO: find more optimal number of goroutines. (maybe pool?)
-
-	statsChan := make(chan Stats, 1000) // bad
-	errorsChan := make(chan error, args.ReqTotal)
 
 	wg := sync.WaitGroup{}
 
@@ -145,43 +143,52 @@ func Run(ctx context.Context, args Opts) (<-chan Stats, <-chan error, error) {
 
 	beforeReq := time.Now()
 
-	// reqQueue := make(chan *http.Request, maxRoutines)
-	//
-	// for totalRequests.Load() < args.ReqTotal {
-	//
-	// }
-	//
+	statsChan := make(chan Stats, 1) // Am i sure?
+	errorsChan := make(chan error, args.ReqTotal)
+	reqQueue := make(chan *http.Request, maxRoutines^2)
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		defer close(reqQueue)
+		for totalRequests.Load() < args.ReqTotal {
+			if err = limiter.Wait(ctx); err != nil {
+				errorsChan <- fmt.Errorf("req limiter: %w", err)
+				return
+			}
+
+			req, err := newRequest(ctx, args.Method.String(), args.URL, body, args.Headers)
+			if err != nil {
+				errorsChan <- fmt.Errorf("new request: %w", err)
+				return
+			}
+
+			select {
+			case <-ctx.Done():
+				return
+			case reqQueue <- req:
+			}
+		}
+	}()
+
 	for range maxRoutines {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-
 			for {
 				select {
 				case <-ctx.Done():
 					return
-				default:
-					if totalRequests.Load() >= args.ReqTotal {
+				case req := <-reqQueue:
+					if req == nil {
 						return
 					}
 					totalRequests.Add(1)
 
-					if err := limiter.Wait(ctx); err != nil {
-						errorsChan <- err
-						return
-					}
-
-					req, err := newRequest(ctx, args.Method.String(), args.URL, body, args.Headers)
-					if err != nil {
-						errorRequests.Add(1)
-						errorsChan <- err
-						continue
-					}
-
 					res, err := client.Do(req)
 					if err != nil {
 						errorRequests.Add(1)
-						errorsChan <- err
+						errorsChan <- fmt.Errorf("request: %w", err)
 						continue
 					}
 					res.Body.Close()
@@ -221,9 +228,9 @@ func Run(ctx context.Context, args Opts) (<-chan Stats, <-chan error, error) {
 			}
 
 			select {
-			case statsChan <- stats:
 			case <-ctx.Done():
 				return
+			case statsChan <- stats:
 			}
 		}
 
@@ -244,7 +251,6 @@ func Run(ctx context.Context, args Opts) (<-chan Stats, <-chan error, error) {
 
 	go func() {
 		wg.Wait()
-		cancel()
 		close(errorsChan)
 	}()
 
