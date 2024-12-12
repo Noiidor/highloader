@@ -151,7 +151,7 @@ func Run(ctx context.Context, args Opts) (<-chan Stats, <-chan error, error) {
 	go func() {
 		defer wg.Done()
 		defer close(reqQueue)
-		for totalRequests.Load() < args.ReqTotal {
+		for totalRequests.Load() <= args.ReqTotal {
 			if err = limiter.Wait(ctx); err != nil {
 				errorsChan <- fmt.Errorf("req limiter: %w", err)
 				return
@@ -213,7 +213,16 @@ func Run(ctx context.Context, args Opts) (<-chan Stats, <-chan error, error) {
 	}
 
 	go func() {
-		sendStats := func() {
+		ticker := time.NewTicker(args.StatsPushFreq)
+
+	loop:
+		for {
+			// Proceeds on either ctx cancellation or ticker tick
+			select {
+			case <-ticker.C:
+			case <-ctx.Done():
+			}
+
 			totalReq := totalRequests.Load()
 
 			msPassed := time.Since(beforeReq).Milliseconds()
@@ -229,22 +238,14 @@ func Run(ctx context.Context, args Opts) (<-chan Stats, <-chan error, error) {
 
 			select {
 			case <-ctx.Done():
-				return
-			case statsChan <- stats:
-			}
-		}
-
-		ticker := time.NewTicker(args.StatsPushFreq)
-
-	loop:
-		for {
-			select {
-			case <-ctx.Done():
-				sendStats()
+				select {
+				case statsChan <- stats:
+				default:
+				}
 				close(statsChan)
 				break loop
-			case <-ticker.C:
-				sendStats()
+			case statsChan <- stats:
+			default: // default to have somewhat relevant stats regardles of channel readiness
 			}
 		}
 	}()
