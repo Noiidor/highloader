@@ -251,6 +251,7 @@ func Run(ctx context.Context, args Opts) (<-chan Stats, <-chan error, error) {
 
 	go func() {
 		wg.Wait()
+		cancel()
 		close(errorsChan)
 	}()
 
