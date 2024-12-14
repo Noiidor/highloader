@@ -52,6 +52,20 @@ type Opts struct {
 	StatsPushFreq time.Duration // frequency of sending stats struct to a channel
 }
 
+func (o Opts) Validate() (err error) {
+	if o.RPS == 0 {
+		err = errors.Join(err, errors.New("0 RPS is not allowed"))
+	}
+	if o.StatsPushFreq == 0 {
+		err = errors.Join(err, errors.New("push frequency cannot be 0"))
+	}
+	if o.HTTPVersion != 1 && o.HTTPVersion != 2 { // meh
+		err = errors.Join(err, errors.New("unsupported HTTP version"))
+	}
+
+	return err
+}
+
 type Stats struct {
 	TotalRequests   uint64 `json:"totalRequests"`
 	SuccessRequests uint64 `json:"successRequests"`
@@ -102,17 +116,11 @@ func newRequest(ctx context.Context, method, url string, body io.Reader, headers
 }
 
 func Run(ctx context.Context, args Opts) (<-chan Stats, <-chan error, error) {
-	if args.RPS == 0 {
-		return nil, nil, errors.New("0 RPS is not allowed")
-	}
-	if args.StatsPushFreq == 0 {
-		return nil, nil, errors.New("push frequency cannot be 0")
-	}
-	if args.HTTPVersion != 1 && args.HTTPVersion != 2 { // meh
-		return nil, nil, errors.New("unsupported HTTP version")
-	}
-
 	var err error
+
+	if err = args.Validate(); err != nil {
+		return nil, nil, err
+	}
 
 	ctx, cancel := context.WithCancel(ctx)
 	go func() {
