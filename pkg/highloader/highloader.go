@@ -8,8 +8,8 @@ import (
 	"io"
 	"net/http"
 	"runtime"
+	"strconv"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"golang.org/x/net/http2"
@@ -70,7 +70,6 @@ type Stats struct {
 	TotalRequests   uint64 `json:"totalRequests"`
 	SuccessRequests uint64 `json:"successRequests"`
 	FailedRequests  uint64 `json:"failedRequests"`
-	Errors          uint64 `json:"errors"`
 	RPS             uint32 `json:"rps"`
 }
 
@@ -79,14 +78,156 @@ func (s Stats) String() string {
 		`Total Requests: %d
 RPS: %d
 Successful Requests: %d
-Failed Requests: %d
-Error Requests: %d`,
+Failed Requests: %d`,
 		s.TotalRequests,
 		s.RPS,
 		s.SuccessRequests,
 		s.FailedRequests,
-		s.Errors,
 	)
+}
+
+func Run(ctx context.Context, args Opts) (<-chan Stats, <-chan error, error) {
+	var err error
+
+	if err = args.Validate(); err != nil {
+		return nil, nil, err
+	}
+
+	ctx, cancel := context.WithCancel(ctx)
+	go func() {
+		if err != nil {
+			cancel()
+		}
+	}()
+
+	bodyBuf := new(bytes.Buffer)
+	if len(args.Payload) > 0 {
+		_, err := bodyBuf.Write(args.Payload)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	body := io.NopCloser(bodyBuf)
+
+	numWorkers := runtime.GOMAXPROCS(0) // TODO: find more optimal number of goroutines. (maybe pool?)
+	numConsumers := 1
+
+	statsChan := make(chan Stats, 1) // Am i sure?
+	errs := make(chan error, args.ReqTotal)
+	reqQueue := make(chan *http.Request, numWorkers^2)
+	resQueue := make(chan *http.Response, args.ReqTotal)
+	statusCodes := make(chan int, args.ReqTotal)
+
+	client := newClient(args.ReqTimeout, args.HTTPVersion)
+
+	// Workers for I/O bound load of requests
+	workWg := new(sync.WaitGroup)
+	for range numWorkers {
+		workWg.Add(1)
+		go worker(ctx, workWg, client, reqQueue, resQueue, errs)
+	}
+	go func() {
+		workWg.Wait()
+		close(resQueue)
+		close(errs)
+	}()
+
+	// Results consumer for CPU bound body processing
+	consWg := new(sync.WaitGroup)
+	for range numConsumers {
+		consWg.Add(1)
+		go consumer(ctx, consWg, resQueue, statusCodes)
+	}
+	go func() {
+		consWg.Wait()
+		close(statusCodes)
+	}()
+
+	// Calculating stats
+	// This is the most questionable part
+	// I have a strong feeling that this is ugly
+	go func() {
+		defer close(statsChan)
+
+		codes := make(map[int]int, 0)
+
+		beforeReq := time.Now()
+		ticker := time.NewTicker(args.StatsPushFreq)
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case code := <-statusCodes:
+				if code == 0 {
+					return
+				}
+				codes[code]++
+			case <-ticker.C:
+				total := 0
+				success := 0
+				fail := 0
+
+				for k, v := range codes {
+					total += v
+					switch []rune(strconv.Itoa(k))[0] { // surely it can be done without conversion
+					case '5' | '4':
+						fail += v
+					default:
+						success += v
+					}
+				}
+
+				msPassed := time.Since(beforeReq).Milliseconds()
+				rps := int(float64(total) / (float64(msPassed) / 1000))
+
+				stats := Stats{
+					TotalRequests:   uint64(total),
+					SuccessRequests: uint64(success),
+					FailedRequests:  uint64(fail),
+					RPS:             uint32(rps),
+				}
+
+				select {
+				case <-ctx.Done():
+					select {
+					case statsChan <- stats:
+					default:
+						return
+					}
+				case statsChan <- stats:
+				}
+
+			}
+		}
+	}()
+
+	limiter := rate.NewLimiter(rate.Limit(args.RPS), int(args.RPS))
+
+	// Jobs producer
+	go func() {
+		defer close(reqQueue) // maybe nil chan?
+		for range args.ReqTotal {
+			if err = limiter.Wait(ctx); err != nil {
+				errs <- fmt.Errorf("req limiter: %w", err)
+				return
+			}
+
+			req, err := newRequest(ctx, args.Method.String(), args.URL, body, args.Headers)
+			if err != nil {
+				errs <- fmt.Errorf("new request: %w", err)
+				return
+			}
+
+			select {
+			case <-ctx.Done():
+				return
+			case reqQueue <- req:
+			}
+		}
+	}()
+
+	return statsChan, errs, nil
 }
 
 func newClient(reqTimeout time.Duration, HTTPVer int) *http.Client {
@@ -115,154 +256,40 @@ func newRequest(ctx context.Context, method, url string, body io.Reader, headers
 	return req, nil
 }
 
-func Run(ctx context.Context, args Opts) (<-chan Stats, <-chan error, error) {
-	var err error
-
-	if err = args.Validate(); err != nil {
-		return nil, nil, err
-	}
-
-	ctx, cancel := context.WithCancel(ctx)
-	go func() {
-		if err != nil {
-			cancel()
-		}
-	}()
-
-	client := newClient(args.ReqTimeout, args.HTTPVersion)
-
-	bodyBuf := new(bytes.Buffer)
-	if len(args.Payload) > 0 {
-		_, err := bodyBuf.Write(args.Payload)
-		if err != nil {
-			return nil, nil, err
-		}
-	}
-	body := io.NopCloser(bodyBuf)
-
-	// Maybe do it somehow through channels?
-	var totalRequests, successfulRequests, failedRequests, errorRequests atomic.Uint64
-
-	maxRoutines := runtime.GOMAXPROCS(0) // TODO: find more optimal number of goroutines. (maybe pool?)
-
-	wg := sync.WaitGroup{}
-
-	limiter := rate.NewLimiter(rate.Limit(args.RPS), int(args.RPS))
-
-	beforeReq := time.Now()
-
-	statsChan := make(chan Stats, 1) // Am i sure?
-	errorsChan := make(chan error, args.ReqTotal)
-	reqQueue := make(chan *http.Request, maxRoutines^2)
-
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		defer close(reqQueue)
-		for totalRequests.Load() <= args.ReqTotal {
-			if err = limiter.Wait(ctx); err != nil {
-				errorsChan <- fmt.Errorf("req limiter: %w", err)
+func worker(ctx context.Context, wg *sync.WaitGroup, client *http.Client, reqs <-chan *http.Request, resps chan<- *http.Response, errs chan<- error) {
+	defer wg.Done()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case req := <-reqs:
+			if req == nil {
 				return
 			}
 
-			req, err := newRequest(ctx, args.Method.String(), args.URL, body, args.Headers)
+			res, err := client.Do(req)
 			if err != nil {
-				errorsChan <- fmt.Errorf("new request: %w", err)
-				return
+				errs <- err
 			}
-
-			select {
-			case <-ctx.Done():
-				return
-			case reqQueue <- req:
-			}
+			resps <- res
 		}
-	}()
-
-	for range maxRoutines {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case req := <-reqQueue:
-					if req == nil {
-						return
-					}
-					totalRequests.Add(1)
-
-					res, err := client.Do(req)
-					if err != nil {
-						errorRequests.Add(1)
-						errorsChan <- fmt.Errorf("request: %w", err)
-						continue
-					}
-					res.Body.Close()
-
-					switch res.Status[0] {
-					case '4' | '5':
-						failedRequests.Add(1)
-					default:
-						successfulRequests.Add(1)
-					}
-
-					// _, err = io.ReadAll(req.Body)
-					// if err != nil {
-					// 	ErrorRequests.Add(1)
-					// 	errorsChan <- err
-					// 	continue
-					// }
-				}
-			}
-
-		}()
 	}
+}
 
-	go func() {
-		ticker := time.NewTicker(args.StatsPushFreq)
-
-	loop:
-		for {
-			// Proceeds on either ctx cancellation or ticker tick
-			select {
-			case <-ticker.C:
-			case <-ctx.Done():
+// Separate consumer is needed in case if there is a need for body processing
+func consumer(ctx context.Context, wg *sync.WaitGroup, resps <-chan *http.Response, codes chan<- int) {
+	defer wg.Done()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case res := <-resps:
+			if res == nil {
+				return
 			}
+			res.Body.Close()
 
-			totalReq := totalRequests.Load()
-
-			msPassed := time.Since(beforeReq).Milliseconds()
-			rps := int(float64(totalReq) / (float64(msPassed) / 1000))
-
-			stats := Stats{
-				TotalRequests:   totalReq,
-				SuccessRequests: successfulRequests.Load(),
-				FailedRequests:  failedRequests.Load(),
-				Errors:          errorRequests.Load(),
-				RPS:             uint32(rps),
-			}
-
-			select {
-			case <-ctx.Done():
-				select {
-				case statsChan <- stats:
-				default:
-				}
-				close(statsChan)
-				break loop
-			case statsChan <- stats:
-			default: // default to have somewhat relevant stats regardles of channel readiness
-			}
+			codes <- res.StatusCode
 		}
-	}()
-
-	go func() {
-		wg.Wait()
-		cancel()
-		close(errorsChan)
-	}()
-
-	return statsChan, errorsChan, nil
+	}
 }
