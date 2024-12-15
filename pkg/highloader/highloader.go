@@ -7,8 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"runtime"
-	"strconv"
 	"sync"
 	"time"
 
@@ -86,68 +84,66 @@ Failed Requests: %d`,
 	)
 }
 
-func Run(ctx context.Context, args Args) (<-chan *Stats, <-chan error, error) {
+type Request struct {
+	URL     string
+	Method  HTTPMethod
+	Headers http.Header
+	Payload io.Reader
+}
+
+func Run(ctx context.Context, numIOWorkers, numCPUWorkers int, args Args) (<-chan *Stats, <-chan error, error) {
 	if err := args.Validate(); err != nil {
 		return nil, nil, err
 	}
 
 	bodyBuf := new(bytes.Buffer)
 	if len(args.Payload) > 0 {
-		_, err := bodyBuf.Write(args.Payload)
-		if err != nil {
-			return nil, nil, err
+		n, _ := bodyBuf.Write(args.Payload)
+		if n != len(args.Payload) {
+			return nil, nil, errors.New("buffer write: n != len")
 		}
 	}
 	body := io.NopCloser(bodyBuf)
 
-	numWorkers := runtime.GOMAXPROCS(0) // TODO: find more optimal number of goroutines. (maybe pool?)
-	numConsumers := 1
-
 	errs := make(chan error, args.ReqTotal)
-	reqQueue := make(chan *http.Request, numWorkers^2)
+	jobs := make(chan *Request, numIOWorkers^2)
 
 	client := newClient(args.ReqTimeout, args.HTTPVersion)
 
 	wg := new(sync.WaitGroup)
 
-	// Workers for I/O bound load of requests
-	wg.Add(1)
-	resps := spawnWorkers(ctx, client, numWorkers, reqQueue, errs)
-
-	// Results consumer for CPU bound body processing
-	wg.Add(1) // not needed here now, just for convenience in the future
-	codes := spawnConsumers(ctx, numConsumers, resps)
-
-	limiter := rate.NewLimiter(rate.Limit(args.RPS), int(args.RPS))
-
 	// Jobs producer
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		defer close(reqQueue)
+		defer close(jobs)
 		for range args.ReqTotal {
-			if err := limiter.Wait(ctx); err != nil {
-				errs <- fmt.Errorf("req limiter: %w", err)
-				return
-			}
-
-			req, err := newRequest(ctx, args.Method.String(), args.URL, body, args.Headers)
-			if err != nil {
-				errs <- fmt.Errorf("new request: %w", err)
-				return
+			req := &Request{
+				URL:     args.URL,
+				Method:  args.Method,
+				Headers: args.Headers,
+				Payload: body,
 			}
 
 			select {
 			case <-ctx.Done():
 				return
-			case reqQueue <- req:
+			case jobs <- req:
 			}
 		}
 	}()
 	go func() {
-		wg.Done()
+		wg.Wait()
 		close(errs)
 	}()
+
+	limiter := rate.NewLimiter(rate.Limit(args.RPS), int(args.RPS))
+	wg.Add(1)
+	// Workers for I/O bound load of requests
+	results := spawnWorkers(ctx, wg, limiter, client, numIOWorkers, jobs, errs)
+
+	// Results consumer for CPU bound body processing
+	codes := spawnConsumers(ctx, numCPUWorkers, results)
 
 	// Calculating stats
 	// I doubt this is right
@@ -182,6 +178,8 @@ func newRequest(ctx context.Context, method, url string, body io.Reader, headers
 	return req, nil
 }
 
+// func spawnProducer(ctx context.Context, )
+
 func spawnStatsProcessor(ctx context.Context, pushFreq time.Duration, codes <-chan int) <-chan *Stats {
 	stats := make(chan *Stats, 1)
 	go func() {
@@ -198,16 +196,15 @@ func spawnStatsProcessor(ctx context.Context, pushFreq time.Duration, codes <-ch
 			select {
 			case <-ctx.Done():
 				return
-			case code := <-codes:
-				if code == 0 {
+			case code, ok := <-codes:
+				if !ok {
 					return
 				}
 
 				total++
-				switch []rune(strconv.Itoa(code))[0] { // Str conversion for each iteration is bad
-				case '5' | '4':
+				if code >= 400 {
 					fail++
-				default:
+				} else {
 					success++
 				}
 
@@ -224,11 +221,7 @@ func spawnStatsProcessor(ctx context.Context, pushFreq time.Duration, codes <-ch
 
 				select {
 				case <-ctx.Done():
-					select {
-					case stats <- stat:
-					default:
-						return
-					}
+					return
 				case stats <- stat:
 				}
 
@@ -239,36 +232,51 @@ func spawnStatsProcessor(ctx context.Context, pushFreq time.Duration, codes <-ch
 	return stats
 }
 
-func spawnWorkers(ctx context.Context, client *http.Client, numWorkers int, reqs <-chan *http.Request, errs chan<- error) <-chan *http.Response {
+func spawnWorkers(ctx context.Context, outerWg *sync.WaitGroup, limiter *rate.Limiter, client *http.Client, numWorkers int, reqs <-chan *Request, errs chan<- error) <-chan *http.Response {
 	wg := new(sync.WaitGroup)
 	resps := make(chan *http.Response, numWorkers)
 	for range numWorkers {
 		wg.Add(1)
-		go worker(ctx, wg, client, reqs, resps, errs)
+		go func() {
+			worker(ctx, limiter, client, reqs, resps, errs)
+			wg.Done()
+		}()
 	}
 	go func() {
-		wg.Done()
+		wg.Wait()
+		outerWg.Done()
 		close(resps)
 	}()
 	return resps
 }
 
-func worker(ctx context.Context, wg *sync.WaitGroup, client *http.Client, reqs <-chan *http.Request, resps chan<- *http.Response, errs chan<- error) {
-	defer wg.Done()
+func worker(ctx context.Context, limiter *rate.Limiter, client *http.Client, reqs <-chan *Request, resps chan<- *http.Response, errs chan<- error) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case req := <-reqs:
-			if req == nil { // maybe nil chan to get rid of this?
+		case request, ok := <-reqs:
+			if !ok {
 				return
 			}
+
+			req, err := newRequest(ctx, request.Method.String(), request.URL, request.Payload, request.Headers)
+			if err != nil {
+				return
+			}
+
+			_ = limiter.Wait(ctx)
 
 			res, err := client.Do(req)
 			if err != nil {
 				errs <- err
 			}
-			resps <- res
+
+			select {
+			case <-ctx.Done():
+				return
+			case resps <- res:
+			}
 		}
 	}
 }
@@ -278,7 +286,10 @@ func spawnConsumers(ctx context.Context, numConsumers int, resps <-chan *http.Re
 	codes := make(chan int, numConsumers)
 	for range numConsumers {
 		wg.Add(1)
-		go consumer(ctx, wg, resps, codes)
+		go func() {
+			consumer(ctx, resps, codes)
+			wg.Done()
+		}()
 	}
 	go func() {
 		wg.Wait()
@@ -288,14 +299,13 @@ func spawnConsumers(ctx context.Context, numConsumers int, resps <-chan *http.Re
 }
 
 // Separate consumer is needed in case if there is a need for body processing
-func consumer(ctx context.Context, wg *sync.WaitGroup, resps <-chan *http.Response, codes chan<- int) {
-	defer wg.Done()
+func consumer(ctx context.Context, resps <-chan *http.Response, codes chan<- int) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case res := <-resps:
-			if res == nil {
+		case res, ok := <-resps:
+			if !ok {
 				return
 			}
 			res.Body.Close()

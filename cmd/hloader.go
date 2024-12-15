@@ -22,11 +22,8 @@ func main() {
 	// }()
 
 	ctx := context.Background()
-
-	out := os.Stderr
-
-	if err := hloader.RunApp(ctx, out); err != nil {
-		fmt.Fprintf(out, "Error: %s", err)
+	if err := hloader.RunApp(ctx); err != nil {
+		fmt.Printf("Error: %s", err)
 		os.Exit(1)
 	}
 }
