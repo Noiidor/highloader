@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -36,9 +37,12 @@ func benchmarkRun(n uint64, b *testing.B) {
 		StatsPushFreq: pushFreq,
 	}
 
+	numIOWorkers := runtime.GOMAXPROCS(0)
+	numCPUWorkers := 1
+
 	b.ResetTimer()
 	for range b.N {
-		_, _, err := Run(ctx, args)
+		_, _, err := Run(ctx, numIOWorkers, numCPUWorkers, args)
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -77,7 +81,10 @@ func TestRun(t *testing.T) {
 		StatsPushFreq: pushFreq,
 	}
 
-	stats, errs, err := Run(ctx, args)
+	numIOWorkers := runtime.GOMAXPROCS(0)
+	numCPUWorkers := 1
+
+	stats, errs, err := Run(ctx, numIOWorkers, numCPUWorkers, args)
 	if err != nil {
 		t.Fatal(err)
 	}

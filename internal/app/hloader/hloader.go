@@ -4,10 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
-	"os"
 	"os/signal"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -30,7 +29,7 @@ type AppArgs struct {
 	} `positional-args:"yes" required:"yes"`
 }
 
-func RunApp(ctx context.Context, out io.Writer) error {
+func RunApp(ctx context.Context) error {
 	args := AppArgs{}
 	flagsParser := flags.NewParser(&args, flags.Default)
 	_, err := flagsParser.Parse()
@@ -48,21 +47,18 @@ func RunApp(ctx context.Context, out io.Writer) error {
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, args.TotalTimeout)
+	ctx, cancel = signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
-
-	go func() {
-		exit := make(chan os.Signal, 1)
-		signal.Notify(exit, syscall.SIGINT, syscall.SIGTERM)
-
-		<-exit
-		fmt.Println("\nGracefully shutting down...")
-		cancel()
-	}()
 
 	before := time.Now()
 
+	numIOWorkers := runtime.GOMAXPROCS(0)
+	numCPUWorkers := 1
+
 	statsChan, errorsChan, err := highloader.Run(
 		ctx,
+		numIOWorkers,
+		numCPUWorkers,
 		highloader.Args{
 			URL:           args.Positional.URL,
 			Method:        highloader.HTTPMethodEnum[args.Method],
@@ -87,11 +83,11 @@ func RunApp(ctx context.Context, out io.Writer) error {
 	for v := range errorsChan {
 		if _, ok := errorsMap[v.Error()]; !ok {
 			errorsMap[v.Error()] = struct{}{}
-			fmt.Fprintf(out, "Err: %s\n", v)
+			fmt.Printf("\nErr: %s\n", v)
 		}
 	}
 
-	fmt.Fprintf(out, "Total time: %s\n", time.Since(before))
+	fmt.Printf("Total time: %s\n", time.Since(before))
 
 	return nil
 }
