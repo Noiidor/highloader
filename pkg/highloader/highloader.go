@@ -93,13 +93,6 @@ func Run(ctx context.Context, args Opts) (<-chan Stats, <-chan error, error) {
 		return nil, nil, err
 	}
 
-	ctx, cancel := context.WithCancel(ctx)
-	go func() {
-		if err != nil {
-			cancel()
-		}
-	}()
-
 	bodyBuf := new(bytes.Buffer)
 	if len(args.Payload) > 0 {
 		_, err := bodyBuf.Write(args.Payload)
@@ -143,16 +136,43 @@ func Run(ctx context.Context, args Opts) (<-chan Stats, <-chan error, error) {
 		close(statusCodes)
 	}()
 
+	limiter := rate.NewLimiter(rate.Limit(args.RPS), int(args.RPS))
+
+	// Jobs producer
+	go func() {
+		defer close(reqQueue)
+		for range args.ReqTotal {
+			if err = limiter.Wait(ctx); err != nil {
+				errs <- fmt.Errorf("req limiter: %w", err)
+				return
+			}
+
+			req, err := newRequest(ctx, args.Method.String(), args.URL, body, args.Headers)
+			if err != nil {
+				errs <- fmt.Errorf("new request: %w", err)
+				return
+			}
+
+			select {
+			case <-ctx.Done():
+				return
+			case reqQueue <- req:
+			}
+		}
+	}()
+
 	// Calculating stats
 	// This is the most questionable part
 	// I have a strong feeling that this is ugly
 	go func() {
 		defer close(statsChan)
 
-		codes := make(map[int]int, 0)
-
 		beforeReq := time.Now()
 		ticker := time.NewTicker(args.StatsPushFreq)
+
+		total := 0
+		success := 0
+		fail := 0
 
 		for {
 			select {
@@ -162,22 +182,16 @@ func Run(ctx context.Context, args Opts) (<-chan Stats, <-chan error, error) {
 				if code == 0 {
 					return
 				}
-				codes[code]++
-			case <-ticker.C:
-				total := 0
-				success := 0
-				fail := 0
 
-				for k, v := range codes {
-					total += v
-					switch []rune(strconv.Itoa(k))[0] { // surely it can be done without conversion
-					case '5' | '4':
-						fail += v
-					default:
-						success += v
-					}
+				total++
+				switch []rune(strconv.Itoa(code))[0] { // surely it can be done without conversion
+				case '5' | '4':
+					fail++
+				default:
+					success++
 				}
 
+			case <-ticker.C:
 				msPassed := time.Since(beforeReq).Milliseconds()
 				rps := int(float64(total) / (float64(msPassed) / 1000))
 
@@ -198,31 +212,6 @@ func Run(ctx context.Context, args Opts) (<-chan Stats, <-chan error, error) {
 				case statsChan <- stats:
 				}
 
-			}
-		}
-	}()
-
-	limiter := rate.NewLimiter(rate.Limit(args.RPS), int(args.RPS))
-
-	// Jobs producer
-	go func() {
-		defer close(reqQueue) // maybe nil chan?
-		for range args.ReqTotal {
-			if err = limiter.Wait(ctx); err != nil {
-				errs <- fmt.Errorf("req limiter: %w", err)
-				return
-			}
-
-			req, err := newRequest(ctx, args.Method.String(), args.URL, body, args.Headers)
-			if err != nil {
-				errs <- fmt.Errorf("new request: %w", err)
-				return
-			}
-
-			select {
-			case <-ctx.Done():
-				return
-			case reqQueue <- req:
 			}
 		}
 	}()
@@ -263,7 +252,7 @@ func worker(ctx context.Context, wg *sync.WaitGroup, client *http.Client, reqs <
 		case <-ctx.Done():
 			return
 		case req := <-reqs:
-			if req == nil {
+			if req == nil { // maybe nil chan to get rid of this?
 				return
 			}
 
