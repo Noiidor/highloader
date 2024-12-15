@@ -63,7 +63,7 @@ func RunApp(ctx context.Context, out io.Writer) error {
 
 	statsChan, errorsChan, err := highloader.Run(
 		ctx,
-		highloader.Opts{
+		highloader.Args{
 			URL:           args.Positional.URL,
 			Method:        highloader.HTTPMethodEnum[args.Method],
 			HTTPVersion:   1,

@@ -38,7 +38,7 @@ var HTTPMethodEnum = map[string]HTTPMethod{
 	"DELETE": HTTPMethodDELETE,
 }
 
-type Opts struct {
+type Args struct {
 	URL         string
 	Method      HTTPMethod
 	HTTPVersion int
@@ -52,7 +52,7 @@ type Opts struct {
 	StatsPushFreq time.Duration // frequency of sending stats struct to a channel
 }
 
-func (o Opts) Validate() (err error) {
+func (o Args) Validate() (err error) {
 	if o.RPS == 0 {
 		err = errors.Join(err, errors.New("0 RPS is not allowed"))
 	}
@@ -86,10 +86,8 @@ Failed Requests: %d`,
 	)
 }
 
-func Run(ctx context.Context, args Opts) (<-chan Stats, <-chan error, error) {
-	var err error
-
-	if err = args.Validate(); err != nil {
+func Run(ctx context.Context, args Args) (<-chan Stats, <-chan error, error) {
+	if err := args.Validate(); err != nil {
 		return nil, nil, err
 	}
 
@@ -113,7 +111,10 @@ func Run(ctx context.Context, args Opts) (<-chan Stats, <-chan error, error) {
 
 	client := newClient(args.ReqTimeout, args.HTTPVersion)
 
+	wg := new(sync.WaitGroup)
+
 	// Workers for I/O bound load of requests
+	wg.Add(1)
 	workWg := new(sync.WaitGroup)
 	for range numWorkers {
 		workWg.Add(1)
@@ -121,8 +122,8 @@ func Run(ctx context.Context, args Opts) (<-chan Stats, <-chan error, error) {
 	}
 	go func() {
 		workWg.Wait()
+		wg.Done()
 		close(resQueue)
-		close(errs)
 	}()
 
 	// Results consumer for CPU bound body processing
@@ -139,10 +140,12 @@ func Run(ctx context.Context, args Opts) (<-chan Stats, <-chan error, error) {
 	limiter := rate.NewLimiter(rate.Limit(args.RPS), int(args.RPS))
 
 	// Jobs producer
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		defer close(reqQueue)
 		for range args.ReqTotal {
-			if err = limiter.Wait(ctx); err != nil {
+			if err := limiter.Wait(ctx); err != nil {
 				errs <- fmt.Errorf("req limiter: %w", err)
 				return
 			}
@@ -159,6 +162,10 @@ func Run(ctx context.Context, args Opts) (<-chan Stats, <-chan error, error) {
 			case reqQueue <- req:
 			}
 		}
+	}()
+	go func() {
+		wg.Done()
+		close(errs)
 	}()
 
 	// Calculating stats

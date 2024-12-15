@@ -26,7 +26,7 @@ func benchmarkRun(n uint64, b *testing.B) {
 
 	pushFreq := 1 * time.Second
 
-	args := Opts{
+	args := Args{
 		URL:           server.URL,
 		Method:        HTTPMethodPOST,
 		HTTPVersion:   1,
@@ -67,7 +67,7 @@ func TestRun(t *testing.T) {
 
 	pushFreq := 50 * time.Millisecond
 
-	args := Opts{
+	args := Args{
 		URL:           server.URL,
 		Method:        HTTPMethodPOST,
 		HTTPVersion:   1,
