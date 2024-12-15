@@ -86,7 +86,7 @@ Failed Requests: %d`,
 	)
 }
 
-func Run(ctx context.Context, args Args) (<-chan Stats, <-chan error, error) {
+func Run(ctx context.Context, args Args) (<-chan *Stats, <-chan error, error) {
 	if err := args.Validate(); err != nil {
 		return nil, nil, err
 	}
@@ -103,11 +103,8 @@ func Run(ctx context.Context, args Args) (<-chan Stats, <-chan error, error) {
 	numWorkers := runtime.GOMAXPROCS(0) // TODO: find more optimal number of goroutines. (maybe pool?)
 	numConsumers := 1
 
-	statsChan := make(chan Stats, 1) // Am i sure?
 	errs := make(chan error, args.ReqTotal)
 	reqQueue := make(chan *http.Request, numWorkers^2)
-	resQueue := make(chan *http.Response, args.ReqTotal)
-	statusCodes := make(chan int, args.ReqTotal)
 
 	client := newClient(args.ReqTimeout, args.HTTPVersion)
 
@@ -115,29 +112,11 @@ func Run(ctx context.Context, args Args) (<-chan Stats, <-chan error, error) {
 
 	// Workers for I/O bound load of requests
 	wg.Add(1)
-	workWg := new(sync.WaitGroup)
-	for range numWorkers {
-		workWg.Add(1)
-		go worker(ctx, workWg, client, reqQueue, resQueue, errs)
-	}
-	go func() {
-		workWg.Wait()
-		wg.Done()
-		close(resQueue)
-	}()
+	resps := spawnWorkers(ctx, client, numWorkers, reqQueue, errs)
 
 	// Results consumer for CPU bound body processing
-	wg.Add(1) // not needed here now, just for convenience in future
-	consWg := new(sync.WaitGroup)
-	for range numConsumers {
-		consWg.Add(1)
-		go consumer(ctx, consWg, resQueue, statusCodes)
-	}
-	go func() {
-		consWg.Wait()
-		wg.Done()
-		close(statusCodes)
-	}()
+	wg.Add(1) // not needed here now, just for convenience in the future
+	codes := spawnConsumers(ctx, numConsumers, resps)
 
 	limiter := rate.NewLimiter(rate.Limit(args.RPS), int(args.RPS))
 
@@ -172,59 +151,9 @@ func Run(ctx context.Context, args Args) (<-chan Stats, <-chan error, error) {
 
 	// Calculating stats
 	// I doubt this is right
-	go func() {
-		defer close(statsChan)
+	stats := spawnStatsProcessor(ctx, args.StatsPushFreq, codes)
 
-		beforeReq := time.Now()
-		ticker := time.NewTicker(args.StatsPushFreq)
-
-		total := 0
-		success := 0
-		fail := 0
-
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case code := <-statusCodes:
-				if code == 0 {
-					return
-				}
-
-				total++
-				switch []rune(strconv.Itoa(code))[0] { // Str conversion for each iteration is bad
-				case '5' | '4':
-					fail++
-				default:
-					success++
-				}
-
-			case <-ticker.C:
-				msPassed := time.Since(beforeReq).Milliseconds()
-				rps := int(float64(total) / (float64(msPassed) / 1000))
-
-				stats := Stats{
-					TotalRequests:   uint64(total),
-					SuccessRequests: uint64(success),
-					FailedRequests:  uint64(fail),
-					RPS:             uint32(rps),
-				}
-
-				select {
-				case <-ctx.Done():
-					select {
-					case statsChan <- stats:
-					default:
-						return
-					}
-				case statsChan <- stats:
-				}
-
-			}
-		}
-	}()
-
-	return statsChan, errs, nil
+	return stats, errs, nil
 }
 
 func newClient(reqTimeout time.Duration, HTTPVer int) *http.Client {
@@ -253,6 +182,77 @@ func newRequest(ctx context.Context, method, url string, body io.Reader, headers
 	return req, nil
 }
 
+func spawnStatsProcessor(ctx context.Context, pushFreq time.Duration, codes <-chan int) <-chan *Stats {
+	stats := make(chan *Stats, 1)
+	go func() {
+		defer close(stats)
+
+		beforeReq := time.Now()
+		ticker := time.NewTicker(pushFreq)
+
+		total := 0
+		success := 0
+		fail := 0
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case code := <-codes:
+				if code == 0 {
+					return
+				}
+
+				total++
+				switch []rune(strconv.Itoa(code))[0] { // Str conversion for each iteration is bad
+				case '5' | '4':
+					fail++
+				default:
+					success++
+				}
+
+			case <-ticker.C:
+				msPassed := time.Since(beforeReq).Milliseconds()
+				rps := int(float64(total) / (float64(msPassed) / 1000))
+
+				stat := &Stats{
+					TotalRequests:   uint64(total),
+					SuccessRequests: uint64(success),
+					FailedRequests:  uint64(fail),
+					RPS:             uint32(rps),
+				}
+
+				select {
+				case <-ctx.Done():
+					select {
+					case stats <- stat:
+					default:
+						return
+					}
+				case stats <- stat:
+				}
+
+			}
+		}
+	}()
+
+	return stats
+}
+
+func spawnWorkers(ctx context.Context, client *http.Client, numWorkers int, reqs <-chan *http.Request, errs chan<- error) <-chan *http.Response {
+	wg := new(sync.WaitGroup)
+	resps := make(chan *http.Response, numWorkers)
+	for range numWorkers {
+		wg.Add(1)
+		go worker(ctx, wg, client, reqs, resps, errs)
+	}
+	go func() {
+		wg.Done()
+		close(resps)
+	}()
+	return resps
+}
+
 func worker(ctx context.Context, wg *sync.WaitGroup, client *http.Client, reqs <-chan *http.Request, resps chan<- *http.Response, errs chan<- error) {
 	defer wg.Done()
 	for {
@@ -271,6 +271,20 @@ func worker(ctx context.Context, wg *sync.WaitGroup, client *http.Client, reqs <
 			resps <- res
 		}
 	}
+}
+
+func spawnConsumers(ctx context.Context, numConsumers int, resps <-chan *http.Response) <-chan int {
+	wg := new(sync.WaitGroup)
+	codes := make(chan int, numConsumers)
+	for range numConsumers {
+		wg.Add(1)
+		go consumer(ctx, wg, resps, codes)
+	}
+	go func() {
+		wg.Wait()
+		close(codes)
+	}()
+	return codes
 }
 
 // Separate consumer is needed in case if there is a need for body processing
