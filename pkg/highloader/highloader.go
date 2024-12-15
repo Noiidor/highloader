@@ -127,6 +127,7 @@ func Run(ctx context.Context, args Args) (<-chan Stats, <-chan error, error) {
 	}()
 
 	// Results consumer for CPU bound body processing
+	wg.Add(1) // not needed here now, just for convenience in future
 	consWg := new(sync.WaitGroup)
 	for range numConsumers {
 		consWg.Add(1)
@@ -134,6 +135,7 @@ func Run(ctx context.Context, args Args) (<-chan Stats, <-chan error, error) {
 	}
 	go func() {
 		consWg.Wait()
+		wg.Done()
 		close(statusCodes)
 	}()
 
@@ -169,8 +171,7 @@ func Run(ctx context.Context, args Args) (<-chan Stats, <-chan error, error) {
 	}()
 
 	// Calculating stats
-	// This is the most questionable part
-	// I have a strong feeling that this is ugly
+	// I doubt this is right
 	go func() {
 		defer close(statsChan)
 
@@ -191,7 +192,7 @@ func Run(ctx context.Context, args Args) (<-chan Stats, <-chan error, error) {
 				}
 
 				total++
-				switch []rune(strconv.Itoa(code))[0] { // surely it can be done without conversion
+				switch []rune(strconv.Itoa(code))[0] { // Str conversion for each iteration is bad
 				case '5' | '4':
 					fail++
 				default:
