@@ -11,21 +11,22 @@ import (
 )
 
 func main() {
-
-	// memStats := new(runtime.MemStats)
-	// go func() {
-	// 	for {
-	// 		time.Sleep(time.Second * 1)
-	// 		runtime.ReadMemStats(memStats)
-	// 		PrintProfStats(memStats)
-	// 	}
-	// }()
-
 	ctx := context.Background()
 	if err := hloader.RunApp(ctx); err != nil {
-		fmt.Printf("Error: %s", err)
+		fmt.Printf("Application error: %s", err)
 		os.Exit(1)
 	}
+}
+
+func CollectProfStats() {
+	memStats := new(runtime.MemStats)
+	go func() {
+		for {
+			time.Sleep(time.Second * 1)
+			runtime.ReadMemStats(memStats)
+			PrintProfStats(memStats)
+		}
+	}()
 }
 
 func PrintProfStats(m *runtime.MemStats) {

@@ -33,7 +33,10 @@ func RunApp(ctx context.Context) error {
 	args := AppArgs{}
 	flagsParser := flags.NewParser(&args, flags.Default)
 	_, err := flagsParser.Parse()
-	if err != nil && errors.Is(err, flags.ErrHelp) {
+	if err != nil {
+		if errors.Is(err, flags.ErrHelp) {
+			return nil
+		}
 		return err
 	}
 
