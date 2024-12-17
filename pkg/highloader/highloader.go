@@ -270,6 +270,7 @@ func worker(ctx context.Context, limiter *rate.Limiter, client *http.Client, req
 			res, err := client.Do(req)
 			if err != nil {
 				errs <- err
+				continue
 			}
 
 			select {
