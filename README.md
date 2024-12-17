@@ -33,7 +33,9 @@ func main() {
         RPS: 100,
         // There are more options
     }
-    stats, errs, err := highloader.Run(ctx, opts)
+    numRoutines := runtime.GOMAXPROCS(0)
+    numReceiverRoutines := 1
+    stats, errs, err := highloader.Run(ctx, numRoutines, numReceiverRoutines opts)
     if err != nil {
         log.Fatal(err)
     }
